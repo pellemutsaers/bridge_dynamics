@@ -195,26 +195,20 @@ class MMMBeam(BaseBeam):
         self.g = 9.81
         self.x_vals = np.linspace(0, L, 1000)
 
-    def ODE1_matrix(self, N):
-        Mmat = np.zeros((N, N))
+    def const_matrices(self, N):
         Cmat = np.zeros((N, N))
         Kmat = np.zeros((N, N))
 
         for i in range(N):
-            # Mass matrix
-            Mmat[i, i] = 1.0
-
-            # Damping matrix
             Cmat[i, i] = 0.0
-
-            # Stiffness matrix
             Kmat[i, i] = ((i + 1)**4 * np.pi**4 * self.EI) / (self.L**4 * self.rho)
 
-        return Mmat, Cmat, Kmat
+        return Cmat, Kmat
 
     def newmark_solution(self, x_location):
-        Mmat, Cmat, Kmat = self.ODE1_matrix(self.N)
+        Cmat, Kmat = self.const_matrices(self.N)
 
+        # Initial conditions
         u_cur = np.zeros((self.N, 1))
         v_cur = np.zeros((self.N, 1))
         a_cur = np.zeros((self.N, 1))
@@ -228,12 +222,15 @@ class MMMBeam(BaseBeam):
         c6 = self.dt * (1 - (self.Gamma / (2 * self.beta)))
 
         for t_idx, t in enumerate(self.t_vals):
-            # Calculate the acceleration of the beam (a_beam) based on current accelerations
-            a_beam_t = np.sum(a_cur[k, 0] * np.sin(np.pi * (k + 1) * self.v * (t + self.dt) / self.L) for k in range(self.N))
+            Mmat = np.eye(self.N)
+            for i in range(self.N):
+                for j in range(self.N):
+                    Mmat[i,j] += 2 * self.M * np.sin((i + 1)*np.pi*self.v*t/self.L) * np.sin((j + 1)*np.pi*self.v*t/self.L) / self.rho / self.L
 
-            # Calculate the full force vector at the current time step
-            Fmat = np.array([[(2 * self.M * (self.g - a_beam_t) * np.sin(np.pi * (i + 1) * self.v * t / self.L) / (self.L * self.rho))] for i in range(self.N)])
-
+            Fmat = np.zeros((self.N, 1))
+            for i in range(self.N):
+                Fmat[i] = 2 * self.M / self.L / self.rho * self.g * np.sin((i + 1) * np.pi * self.v * t / self.L)
+            
             lhs = Mmat * c1 + Cmat * c2 + Kmat
             rhs = Fmat + Mmat @ (u_cur * c1 + v_cur * c3 + a_cur * c4) + Cmat @ (u_cur * c2 + v_cur * c5 + a_cur * c6)
 
@@ -252,6 +249,10 @@ class MMMBeam(BaseBeam):
             a_cur = a_next
 
         return -np.array(y_array)
+    
+    def get_omega_n(self, n):
+        """Natural frequency of mode n."""
+        return (n * np.pi / self.L)**2 * np.sqrt(self.EI / self.rho)
 
     def calculate_moment(self, w_vals):
         """Calculate bending moment M(x, t)."""
@@ -260,29 +261,150 @@ class MMMBeam(BaseBeam):
     def calculate_midpoint_results(self, do_moment=False):
             """Calculate displacement and moment at the midpoint over time."""
             x_mid = self.L / 2
-            w_mid_vals = self.newmark_solution(x_mid)  # Calculate midpoint displacement directly
-
+            mid_idx = len(self.x_vals) // 2
             if do_moment:
+
                 M_vals = []
-                w_vals_full = self.newmark_solution(self.x_vals) # Calculate displacement over the entire beam
+                w_vals_full = self.newmark_solution(self.x_vals)
                 x_mid_idx = len(self.x_vals) // 2
                 for i in range(len(self.t_vals)):
-                    M_vals.append(self.calculate_moment(w_vals_full[i, :])) # Assuming w_vals_full is time x space
-                M_mid_vals = np.array(M_vals)[:, x_mid_idx] # Extract midpoint moment over time
-                return w_mid_vals, M_mid_vals
+                    M_vals.append(self.calculate_moment(w_vals_full[i, :]))
+                M_mid_vals = np.array(M_vals)[:, x_mid_idx]
+                return w_vals_full[:, mid_idx], M_mid_vals
             else:
-                return w_mid_vals
+                return self.newmark_solution(x_mid)
 
     def calculate_deflection_and_moment(self):
         """Calculate deflection and moment over the entire beam and time."""
         w_vals = []
         M_vals = []
         for t in self.t_vals:
-            w_t = self.calculate_w(t)
+            w_t = self.newmark_solution(t)
             M_t = self.calculate_moment(w_t)
             w_vals.append(w_t)
             M_vals.append(M_t)
         return np.array(w_vals), np.array(M_vals)
 
+class MSDMMBeam(BaseBeam):
+    def __init__(self, v, L, C, EI, rho, t_end, N, num_t, Mu, Ms, kv, cv, beta, Gamma):
+        super().__init__(v, L, C, EI, rho, t_end, N, num_t)
+        self.Mu = Mu # Mass of the 4 wheel sets + 2 bogies
+        self.Ms = Ms # Mass of the train car
+        self.kv = kv # Spring stiffness
+        self.cv = cv # Damping coefficient of the spring
+        self.dt = t_end / num_t
+        self.beta = beta
+        self.Gamma = Gamma
+        self.g = 9.81
+        self.x_vals = np.linspace(0, L, 1000)
 
+    def basis_factor(self, n, t):
+        return np.sin(n * np.pi * self.v * t / self.L) * 2 / self.rho / self.L
+
+    def get_matrices(self, t):
+        """Construct mass, damping, stiffness matrices and force vector."""
+        Mmat = np.eye(self.N + 1)
+
+        for i in range(self.N):
+            for j in range(self.N):
+                Mmat[i, j] += self.basis_factor(i + 1, t) * np.sin((j + 1) * np.pi * self.v * t / self.L) * self.Mu
+        Mmat[self.N, self.N] = self.Mu
+
+        Cmat = np.zeros((self.N + 1, self.N + 1))
+        for i in range(self.N):
+            for j in range(self.N):
+                Cmat[i, j] += self.basis_factor(i + 1, t) * np.sin((j + 1) * np.pi * self.v * t / self.L) * self.cv
+        for i in range(self.N):
+            Cmat[i, self.N] -= self.basis_factor(i + 1, t) * self.cv
+            Cmat[self.N, i] -= np.sin((i + 1) * np.pi * self.v * t / self.L) * self.cv
+        Cmat[self.N, self.N] = self.cv
+
+        Kmat = np.zeros((self.N + 1, self.N + 1))
+        for i in range(self.N):
+            Kmat[i,i] = self.get_omega_n(i + 1)**2
+        for i in range(self.N):
+            for j in range(self.N):
+                Kmat[i, j] += self.basis_factor(i + 1, t) * np.sin((j + 1) * np.pi * self.v * t / self.L) * self.kv
+        for i in range(self.N):
+            Kmat[i, self.N] -= self.basis_factor(i + 1, t) * self.kv
+            Kmat[self.N, i] -= np.sin((i + 1) * np.pi * self.v * t / self.L) * self.kv
+        Kmat[self.N, self.N] = self.kv
+
+        Fvec = np.zeros((self.N + 1, 1))
+        for i in range(self.N):
+            Fvec[i] = self.basis_factor(i + 1, t) * (self.Mu * self.g + self.Ms * self.g)
+        Fvec[self.N] = 0.0 
+
+        return Mmat, Cmat, Kmat, Fvec
+
+    def newmark_solution(self, x_location):
+        u_cur = np.zeros((self.N + 1, 1)) # [A1, A2, ..., AN, z]	
+        v_cur = np.zeros((self.N + 1, 1)) # [A'1, A'2, ..., A'N, z']
+        a_cur = np.zeros((self.N + 1, 1)) # [A"1, A"2, ..., A"N, z"]
+
+        y_array = []
+
+        c1 = 1 / (self.beta * self.dt**2)
+        c2 = self.Gamma / (self.beta * self.dt)
+        c3 = 1 / (self.beta * self.dt)
+        c4 = 1 / (2 * self.beta) - 1
+        c5 = 1 - (self.Gamma / self.beta)
+        c6 = self.dt * (1 - (self.Gamma / (2 * self.beta)))
+
+        for t_idx, t in enumerate(self.t_vals):
+            Mmat, Cmat, Kmat, Fmat = self.get_matrices(t)
+            
+            lhs = Mmat * c1 + Cmat * c2 + Kmat
+            rhs = Fmat + Mmat @ (u_cur * c1 + v_cur * c3 + a_cur * c4) + Cmat @ (u_cur * c2 + v_cur * c5 + a_cur * c6)
+
+            u_next = np.linalg.solve(lhs, rhs)
+            a_next = c1 * (u_next - u_cur) - v_cur * c3  - a_cur * c4
+            v_next = c2 * (u_next - u_cur) + v_cur * c5 + a_cur * c6
+
+            y_sol = 0
+            x_val = x_location
+            for k in range(self.N):
+                y_sol += u_cur[k, 0] * np.sin(np.pi * x_val * (k + 1) / self.L)
+            y_array.append(y_sol)
+
+            u_cur = u_next
+            v_cur = v_next
+            a_cur = a_next
+
+        return -np.array(y_array)
+    
+    def get_omega_n(self, n):
+        """Natural frequency of mode n."""
+        return (n * np.pi / self.L)**2 * np.sqrt(self.EI / self.rho)
+
+    def calculate_moment(self, w_vals):
+        """Calculate bending moment M(x, t)."""
+        return self.EI * np.gradient(np.gradient(w_vals, self.x_vals), self.x_vals)
+
+    def calculate_midpoint_results(self, do_moment=False):
+            """Calculate displacement and moment at the midpoint over time."""
+            x_mid = self.L / 2
+            mid_idx = len(self.x_vals) // 2
+            if do_moment:
+
+                M_vals = []
+                w_vals_full = self.newmark_solution(self.x_vals)
+                x_mid_idx = len(self.x_vals) // 2
+                for i in range(len(self.t_vals)):
+                    M_vals.append(self.calculate_moment(w_vals_full[i, :]))
+                M_mid_vals = np.array(M_vals)[:, x_mid_idx]
+                return w_vals_full[:, mid_idx], M_mid_vals
+            else:
+                return self.newmark_solution(x_mid)
+
+    def calculate_deflection_and_moment(self):
+        """Calculate deflection and moment over the entire beam and time."""
+        w_vals = []
+        M_vals = []
+        for t in self.t_vals:
+            w_t = self.newmark_solution(t)
+            M_t = self.calculate_moment(w_t)
+            w_vals.append(w_t)
+            M_vals.append(M_t)
+        return np.array(w_vals), np.array(M_vals)
 
