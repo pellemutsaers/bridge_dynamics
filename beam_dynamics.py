@@ -128,7 +128,7 @@ class MHFMBeam(BaseBeam):
         """Damped natural frequency."""
         return omega_n * np.sqrt(1 - xi_n**2)
 
-    def get_q_n(self, t, n, num_steps=1000):
+    def get_q_n(self, t, n, num_steps=10000):
         """Solve for modal amplitude q_n."""
         omega_n = self.get_omega_n(n)
         xi_n = self.get_xi_n(omega_n)
